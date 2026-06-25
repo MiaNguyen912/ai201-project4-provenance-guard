@@ -185,52 +185,53 @@ This section describes the lifecycle of a single piece of submitted text, from t
 
 #### 8. Appeals Workflow (Post-Decision)
 - If a creator believes the result is incorrect, they can submit an appeal.
-- Component: **POST /appeals**
-- Technology: `Flask API`, `Resend API`
+- Component: **POST /appeals**, **PATCH /appeals/{content_id}**
+- Technology: `Flask API`
 - Responsibilities:
     - Accept the creator's explanation.
     - Link the appeal to the original content.
-    - Send Review Email to a decidated human-review email using Resend API, including the original content, attribution result, and creator's reasoning to the reviewer.
-    - call the AuditLogger to add Appeal Audit Record
+    - Append the appeal item to `/logs/appeal_queue.jsonl` so a reviewer can see all pending appeals in one place.
+    - Call the AuditLogger to add an Appeal Audit Record.
+    - On resolution (PATCH /appeals/{content_id}): update the content status, log a resolution audit event, and remove the entry from `/logs/appeal_queue.jsonl`.
 
     ```
-    Example flow:
-    Request: 
+    Example flow — submitting an appeal:
+    Request:
         {
             "content_id": "cnt_123",
+            "client_id": "abc",
             "appeal_reason": "I wrote this essay myself and can provide drafts."
         }
+
     => The system generates a new request ID for the appeal:
         Original Analysis Request: request_id = req_001
         Appeal Request: request_id = req_002
 
-    Then Retrieve Original Decision: The Appeal Service locates the original audit entry using: content_id = cnt_123
-        This retrieves:
+    Retrieve Original Decision via content_id = cnt_123:
         {
             "client_id": "abc",
             "content_id": "cnt_123",
             "request_id": "req_001",
-            ...
+            "final_classification": "uncertain",
+            "confidence": 0.58,
+            "text": "<original text>"
         }
-    
-    Then send email to the reviewer:
-        Subject: Provenance Guard Appeal Review
 
-        Content ID: cnt_123
-        Original Request ID: req_001
+    Append to /logs/appeal_queue.jsonl:
+        {
+            "appeal_request_id": "req_002",
+            "content_id": "cnt_123",
+            "client_id": "abc",
+            "original_request_id": "req_001",
+            "original_classification": "uncertain",
+            "original_confidence": 0.58,
+            "appeal_reason": "I wrote this essay myself and can provide drafts.",
+            "text": "<original text>",
+            "submitted_at": "2026-06-25T14:10:00Z",
+            "status": "pending_review"
+        }
 
-        Original Classification:
-        uncertain (0.58)
-
-        Creator Appeal:
-        "I wrote this essay myself and can provide drafts."
-
-        Content:
-        -------------------
-        <text content here>
-        -------------------
-    
-    System then create Appeal Audit Record:
+    Create Appeal Audit Record:
         {
             "event_type": "appeal_submitted",
             "client_id": "abc",
@@ -240,6 +241,26 @@ This section describes the lifecycle of a single piece of submitted text, from t
             "timestamp": "2026-06-25T14:10:00Z",
             "appeal_reason": "I wrote this essay myself and can provide drafts.",
             "status": "under_review"
+        }
+
+    Example flow — resolving an appeal:
+    Request (PATCH /appeals/cnt_123):
+        {
+            "resolution": "overturned",
+            "reviewer_note": "Creator provided original drafts confirming human authorship."
+        }
+
+    => Remove cnt_123 entry from /logs/appeal_queue.jsonl
+    => Update content status to "resolved"
+    => Create Resolution Audit Record:
+        {
+            "event_type": "appeal_resolved",
+            "content_id": "cnt_123",
+            "request_id": "req_003",
+            "related_request_id": "req_002",
+            "timestamp": "2026-06-26T09:00:00Z",
+            "resolution": "overturned",
+            "reviewer_note": "Creator provided original drafts confirming human authorship."
         }
     ```
 
@@ -265,7 +286,7 @@ This section describes the lifecycle of a single piece of submitted text, from t
     }
 
 #### 2. POST /appeals
-- Purpose: Allow creators to contest a classification and trigger human review.
+- Purpose: Allow creators to contest a classification. Appends the appeal to /logs/appeal_queue.jsonl for human review.
 - Request:
     {
         "content_id": "cnt_123",
@@ -280,7 +301,22 @@ This section describes the lifecycle of a single piece of submitted text, from t
         "message": "Appeal submitted successfully"
     }
 
-#### 3. GET /content/{content_id}
+#### 3. PATCH /appeals/{content_id}
+- Purpose: Resolve a pending appeal — updates content status and removes the entry from appeal_queue.
+- Request:
+    {
+        "resolution": "overturned | upheld",
+        "reviewer_note": "string"
+    }
+- Response:
+    {
+        "content_id": "cnt_123",
+        "resolution": "overturned | upheld",
+        "status": "resolved",
+        "message": "Appeal resolved successfully"
+    }
+
+#### 4. GET /content/{content_id}
 - Purpose: Fetch latest attribution result for a piece of content.
 - Response:
     {
@@ -291,7 +327,7 @@ This section describes the lifecycle of a single piece of submitted text, from t
         "last_updated": "timestamp"
     }
 
-4. GET /audit/{content_id}
+#### 5. GET /audit/{content_id}
 - Purpose: Retrieve full decision history (event log).
 - Response:
     {
@@ -316,6 +352,8 @@ This section describes the lifecycle of a single piece of submitted text, from t
 ### Architecture Diagram
 
 #### Submission Flow
+The submission flow takes raw text through two independent signals—an LLM-based classifier and a stylometric analyzer—before merging their outputs in a confidence evaluator. The system then converts the combined score into a user-facing transparency label, logs a full audit record, and returns the final attribution result to the client.
+
 ```mermaid
 flowchart TD
 
@@ -332,15 +370,95 @@ I -->|"content_id + classification + confidence + label"| J[Client]
 ```
 
 #### Appeal Flow
+The appeal flow covers two operations: a creator submitting a dispute and a reviewer resolving it. On submission, the system retrieves the original audit record, marks the content as under review, and appends the appeal to `/logs/appeal_queue.jsonl`. On resolution, the reviewer calls `PATCH /appeals/{content_id}`, the entry is removed from the queue, and a resolution audit event is logged.
+
 ```mermaid
 flowchart TD
 
 A[Client] -->|"content_id + client_id + appeal_reason"| B["POST /appeals"]
 B -->|lookup by content_id| C[Audit Store]
 C -->|original decision record| D[Status Manager]
-D -->|"status = under_review"| E["Email Review Service - Resend API"]
-E -->|"review payload: text + reason + original decision"| F[Human Reviewer Email]
-E -->|email sent flag| G[AuditLogger]
-G -->|appeal event record| H[Appeal Response Builder]
-H -->|"appeal_request_id + status: under_review"| I[Client]
+D -->|"status = under_review"| E["/logs/appeal_queue.jsonl"]
+E -->|appeal entry appended| F[AuditLogger]
+F -->|appeal_submitted event| G[Appeal Response Builder]
+G -->|"appeal_request_id + status: under_review"| H[Client]
+
+I["Reviewer"] -->|"resolution + reviewer_note"| J["PATCH /appeals/{content_id}"]
+J -->|remove resolved entry| E
+J -->|"status = resolved"| K[AuditLogger]
+K -->|appeal_resolved event| L[Resolution Response Builder]
+L -->|"content_id + resolution + status: resolved"| M[Client]
 ```
+
+
+### Summary Implementation Decisions:
+- **Detection signals:** What are our signals? What does each one measure? What does each signal's output look like (a score between 0–1? a binary flag?), and how will you combine them into a single confidence score?
+    - We use 2 independent signals:
+        1. LLM Classifier (Signal A)
+        Measures: global writing patterns (coherence, fluency, stylistic “AI-likeness”).
+        Output: {prediction: AI|Human, confidence: 0–1}
+        Captures semantic-level judgment but is probabilistic and model-based.
+
+        2. Stylometric Analyzer (Signal B)
+        Measures: statistical properties of text (sentence length variance, type-token ratio, punctuation density, complexity).
+        Output: {prediction: AI|Human, confidence: 0–1}
+        Captures structural writing variability using deterministic heuristics.
+
+    - Combination: We compute a weighted agreement score:
+        Agreement → higher confidence
+        Disagreement → confidence penalty
+        Final output: {classification, confidence ∈ [0,1]}
+
+- **Uncertainty representation:** What does a confidence score of 0.6 mean to your system? How will you map raw signal outputs to a calibrated score? What threshold separates "likely AI" from "uncertain" from "likely human"?
+    - A score of 0.6 means the system has a weak lean toward one classification but lacks reliable signal strength — it should not confidently label the content either way.
+    - Combination formula (ConfidenceEvaluator):
+        - Weighted base: `base = 0.6 × LLM_confidence + 0.4 × stylometric_confidence` (LLM weighted higher as it captures semantics)
+        - If both signals agree on prediction: `final_confidence = base`
+        - If signals disagree: `final_confidence = base × 0.77` (disagreement penalty)
+        - Example: LLM=AI/0.82, Stylometric=Human/0.65 → base = 0.6×0.82 + 0.4×0.65 = 0.752 → with penalty: 0.752 × 0.77 ≈ 0.58 (uncertain)
+    - Threshold mapping:
+        - ≥ 0.85: High confidence → label as AI or Human (strong indicators message)
+        - 0.60 – 0.84: Moderate confidence → label as AI or Human (hedged "analysis suggests" message)
+        - < 0.60: Uncertain → cannot confidently classify
+
+- **Transparency label design:** What exact text will the label show for a high-confidence AI result? A high-confidence human result? An uncertain result? Write out the three label variants now, before you build the UI.
+    - **Label A — High-Confidence AI** (`label: "high_confidence_ai"`, confidence ≥ 0.85, prediction = AI)
+        ```
+        title: "Likely AI-Generated"
+        message: "Our system found strong indicators that this content was generated using AI tools."
+        ```
+    - **Label B — High-Confidence Human** (`label: "high_confidence_human"`, confidence ≥ 0.85, prediction = Human)
+        ```
+        title: "Likely Human-Written"
+        message: "Our system found strong indicators that this content was written by a human author."
+        ```
+    - **Label C — Moderate Confidence** (`label: "high_confidence_ai"` or `"high_confidence_human"`, confidence 0.60–0.84)
+        ```
+        title: "Possibly AI-Generated" / "Possibly Human-Written"
+        message: "Our analysis leans toward this content being [AI-generated / human-written], but the signal is not strong enough to be certain."
+        ```
+    - **Label D — Uncertain** (`label: "uncertain"`, confidence < 0.60)
+        ```
+        title: "Attribution Uncertain"
+        message: "Our system could not confidently determine whether this content was written by a human or generated by AI."
+        ```
+        
+- **Appeals workflow:** Who can submit an appeal? What information do they provide? What does the system do when an appeal is received — what status changes, what gets logged? What would a human reviewer see when they open the appeal queue?
+    - **Who can appeal:** Any creator identified by `client_id` whose content received a classification they dispute.
+    - **What they provide:** `content_id`, `client_id`, and `appeal_reason` (free-text explanation).
+    - **What the system does on receipt:**
+        1. Generates a new `request_id` for the appeal (e.g. `req_002`).
+        2. Retrieves the original audit record via `content_id`.
+        3. Updates content status to `under_review`.
+        4. Appends a structured entry to `/logs/appeal_queue.jsonl` (includes original text, classification, confidence, and appeal reason).
+        5. Logs an `appeal_submitted` audit event with `related_request_id` linking back to the original classification event.
+    - **What a human reviewer sees in the queue:** Each line of `appeal_queue.jsonl` is one pending appeal with the full context needed to decide — original text, classification result, confidence score, and the creator's explanation.
+    - **On resolution (PATCH /appeals/{content_id}):**
+        1. Content status updated to `resolved`.
+        2. Entry removed from `/logs/appeal_queue.jsonl`.
+        3. `appeal_resolved` audit event logged with resolution (`overturned` or `upheld`) and reviewer note.
+
+- **Anticipated edge cases:** What types of content will your system handle poorly? Name at least two specific scenarios.
+    1. **AI-polished human drafts:** A writer drafts a blog post then uses ChatGPT to smooth grammar and flow. The final text retains the human's ideas but exhibits AI-like phrasing uniformity. Both signals agree it's AI — high confidence — but creative origin was human.
+    2. **Formulaic professional writing:** A human-written legal brief uses repetitive passive constructions, consistent clause structure, and formal boilerplate. Stylometrics score it as AI-like due to low sentence variance; the LLM may agree because the prose pattern resembles AI-generated formal text. False positive for an entire genre of human writing.
+    3. **Very short texts:** A two-sentence product description or single-stanza poem gives the stylometric analyzer almost no data — sentence variance and type-token ratio are unreliable under ~50 words. The system defaults to "uncertain" regardless of actual origin.
