@@ -138,7 +138,7 @@ This section describes the lifecycle of a single piece of submitted text, from t
 #### 6. Audit Logging
 - Before returning the response, the system records the decision to support future investigations, debugging, and appeals. This ensures every decision is explainable and traceable.
 - Component: AuditLogger
-- Technology: `SQLite` (built-in) or `structured JSON` (JSONL)
+- Technology: `SQLite` (built-in) (can also use `structured JSON` (JSONL))
 - Responsibilities:
     - Create an immutable record of the analysis in a file in `/logs` folder.
     - Store metadata of each request
@@ -147,23 +147,24 @@ This section describes the lifecycle of a single piece of submitted text, from t
     Example audit entry:
 
     {
-    "event_type": "classification",
-    "client_id": "abc",
-    "content_id": "cnt_123",
-    "request_id": "xyz_123"
-    "timestamp": "2026-06-24T18:30:00Z",
-    "text": "text content"
-    "text_length": 13
-    "llm_result": {
-        "prediction": "AI",
-        "confidence": 0.82
-    },
-    "stylometric_result": {
-        "prediction": "Human",
-        "confidence": 0.65
-    },
-    "final_classification": "uncertain",
-    "confidence": 0.58
+        "event_type": "classification",
+        "creator_id": "abc",
+        "content_id": "cnt_123",
+        "request_id": "xyz_123"
+        "timestamp": "2026-06-24T18:30:00Z",
+        "text": "text content"
+        "text_length": 13
+        "llm_result": {
+            "prediction": "AI",
+            "confidence": 0.82
+        },
+        "stylometric_result": {
+            "prediction": "Human",
+            "confidence": 0.65
+        },
+        "final_classification": "uncertain",
+        "confidence": 0.58,
+        "status" : "final | under_review | appealed"
     }
     ```
 
@@ -199,7 +200,7 @@ This section describes the lifecycle of a single piece of submitted text, from t
     Request:
         {
             "content_id": "cnt_123",
-            "client_id": "abc",
+            "creator_id": "abc",
             "appeal_reason": "I wrote this essay myself and can provide drafts."
         }
 
@@ -209,7 +210,7 @@ This section describes the lifecycle of a single piece of submitted text, from t
 
     Retrieve Original Decision via content_id = cnt_123:
         {
-            "client_id": "abc",
+            "creator_id": "abc",
             "content_id": "cnt_123",
             "request_id": "req_001",
             "final_classification": "uncertain",
@@ -221,7 +222,7 @@ This section describes the lifecycle of a single piece of submitted text, from t
         {
             "appeal_request_id": "req_002",
             "content_id": "cnt_123",
-            "client_id": "abc",
+            "creator_id": "abc",
             "original_request_id": "req_001",
             "original_classification": "uncertain",
             "original_confidence": 0.58,
@@ -234,7 +235,7 @@ This section describes the lifecycle of a single piece of submitted text, from t
     Create Appeal Audit Record:
         {
             "event_type": "appeal_submitted",
-            "client_id": "abc",
+            "creator_id": "abc",
             "content_id": "cnt_123",
             "request_id": "req_002",
             "related_request_id": "req_001",
@@ -271,7 +272,7 @@ This section describes the lifecycle of a single piece of submitted text, from t
 - Purpose: Submit text for AI-vs-human attribution analysis.
 - Request:
     {
-        "client_id": "abc",
+        "creator_id": "abc",
         "text": "string content here"
     }
 - Response:
@@ -281,7 +282,6 @@ This section describes the lifecycle of a single piece of submitted text, from t
         "classification": "AI | Human | uncertain",
         "confidence": 0.0,
         "label": "high_confidence_ai | high_confidence_human | uncertain",
-        "description": "string"
     }
 
 #### 2. POST /appeals
@@ -289,7 +289,7 @@ This section describes the lifecycle of a single piece of submitted text, from t
 - Request:
     {
         "content_id": "cnt_123",
-        "client_id": "abc",
+        "creator_id": "abc",
         "appeal_reason": "string"
     }
 - Response:
@@ -315,37 +315,70 @@ This section describes the lifecycle of a single piece of submitted text, from t
         "message": "Appeal resolved successfully"
     }
 
-#### 4. GET /content/{content_id}
-- Purpose: Fetch latest attribution result for a piece of content.
-- Response:
-    {
-        "content_id": "cnt_123",
-        "latest_classification": "uncertain",
-        "confidence": 0.58,
-        "status": "final | under_review | appealed",
-        "last_updated": "timestamp"
-    }
 
-#### 5. GET /audit/{content_id}
+#### 4. GET /audit/{content_id}
 - Purpose: Retrieve full decision history (event log).
 - Response:
     {
         "content_id": "cnt_123",
         "events": [
             {
-            "event_type": "classification",
-            "request_id": "req_001",
-            "confidence": 0.58
+                "event_type": "classification",
+                "creator_id": "abc",
+                "content_id": "cnt_123",
+                "request_id": "req_001",
+                "original_request_id":  "req_001",
+                "timestamp": "2026-06-24T18:30:00Z",
+                "text": "text content",
+                "text_length": 13
+                "llm_result": {
+                    "prediction": "AI",
+                    "confidence": 0.82
+                },
+                "stylometric_result": {
+                    "prediction": "Human",
+                    "confidence": 0.65
+                },
+                "final_classification": "AI",
+                "confidence": 0.58,
+                "status" : "appealed"
             },
             {
-            "event_type": "appeal_submitted",
-            "request_id": "req_002",
-            "related_request_id": "req_001"
+                "event_type": "appeal_submitted",
+                "creator_id": "abc",
+                "content_id": "cnt_123",
+                "request_id": "req_002",
+                "original_request_id":  "req_001",
+                "timestamp": "2026-06-25T10:30:00Z",
+                "text": "appeal reason",
+                "text_length": 13
+                "llm_result": NULL
+                "stylometric_result": NULL
+                "final_classification": NULL,
+                "confidence": NULL,
+                "status" : "reviewed"
+            },
+            {
+                "event_type": "appeal_reviewed",
+                "creator_id": "abc",
+                "content_id": "cnt_123",
+                "request_id": "req_003",
+                "original_request_id":  "req_001",
+                "timestamp": "2026-06-27T9:30:00Z",
+                "text": "review details",
+                "text_length": 14
+                "llm_result": NULL
+                "stylometric_result": NULL
+                "final_classification": "Human",
+                "confidence": NULL,
+                "status" : "final"
             }
         ]
     }
 
-
+#### 5. GET /log?num_latest_logs=...
+- Purpose: returns the most recent audit log entries as JSON. 
+- return: jsonify({"entries": get_log()}). 
 
 
 ## Architecture Diagram
@@ -356,7 +389,7 @@ The submission flow takes raw text through two independent signals—an LLM-base
 ```mermaid
 flowchart TD
 
-A[Client] -->|"raw text + client_id"| B["POST /submit"]
+A[Client] -->|"raw text + creator_id"| B["POST /submit"]
 B -->|incoming request| C[Rate Limiter]
 C -->|sanitized text| D["LLM Classifier - Signal A"]
 C -->|sanitized text| E["Stylometric Analyzer - Signal B"]
@@ -374,7 +407,7 @@ The appeal flow covers two operations: a creator submitting a dispute and a revi
 ```mermaid
 flowchart TD
 
-A[Client] -->|"content_id + client_id + appeal_reason"| B["POST /appeals"]
+A[Client] -->|"content_id + creator_id + appeal_reason"| B["POST /appeals"]
 B -->|lookup by content_id| C[Audit Store]
 C -->|original decision record| D[Status Manager]
 D -->|"status = under_review"| E["/logs/appeal_queue.jsonl"]
@@ -443,8 +476,8 @@ L -->|"content_id + resolution + status: resolved"| M[Client]
         ```
         
 - **Appeals workflow:** Who can submit an appeal? What information do they provide? What does the system do when an appeal is received — what status changes, what gets logged? What would a human reviewer see when they open the appeal queue?
-    - **Who can appeal:** Any creator identified by `client_id` whose content received a classification they dispute.
-    - **What they provide:** `content_id`, `client_id`, and `appeal_reason` (free-text explanation).
+    - **Who can appeal:** Any creator identified by `creator_id` whose content received a classification they dispute.
+    - **What they provide:** `content_id`, `creator_id`, and `appeal_reason` (free-text explanation).
     - **What the system does on receipt:**
         1. Generates a new `request_id` for the appeal (e.g. `req_002`).
         2. Retrieves the original audit record via `content_id`.
@@ -488,7 +521,16 @@ Curl command to test the full pipeline so far:
 ```
   curl -s -X POST http://localhost:5000/submit \
   -H "Content-Type: application/json" \
-  -d '{"text": "The quarterly earnings report demonstrates consistent revenue growth across all business units, with particular strength in the enterprise segment.", "client_id": "test-user-1"}' | python -m json.tool
+  -d '{"text": "The quarterly earnings report demonstrates consistent revenue growth across all business units, with particular strength in the enterprise segment.", "creator_id": "test-user-1"}' | python -m json.tool
+```
+
+Prompt used: 
+```
+use the "Signal B: Stylometric Analysis" + "Detection signals" + "**Uncertainty representation:**" + architecture diagram in @planning.md to generate: (1) the second signal function, and (2) the confidence scoring logic that combines both signals according to the spec. Verify that the generated scoring function actually matches the threshold defined in the planning document — AI tools sometimes implement reasonable-looking scoring that silently diverges from our specified ranges. If it does, correct it before wiring it in. 
+
+for the stylometric heuristics, compute 2–3 specific metrics (e.g., sentence length variance, type-token ratio, punctuation density, complexity) and decide how to combine them into a single signal score. 
+
+For the confidence score, update submit() in @app.py to have the combined scoring logic. The logic should: vary meaningfully across clearly different inputs (a highly polished, uniform paragraph vs. a casual, irregular piece should produce different scores), and map to these 3 distinct label categories: "Likely AI-generated," "Uncertain," "Likely human-written"
 ```
 
 - **Milestone 5 (label generation + appeals layer):** I'll provide "#### 5. Transparency Label Generation", the label design variants from "### Summary Implementation Decisions", the full "#### 8. Appeals Workflow" section, and the API contract for `POST /appeals` and `PATCH /appeals/{content_id}`. With those, I'll ask it to generate:
@@ -505,7 +547,7 @@ Curl commands to test:
   # Submit an appeal
   curl -s -X POST http://localhost:5000/appeals \
   -H "Content-Type: application/json" \
-  -d '{"content_id": "cnt_123", "client_id": "test-user-1", "appeal_reason": "I wrote this myself and have drafts."}' | python -m json.tool
+  -d '{"content_id": "cnt_123", "creator_id": "test-user-1", "appeal_reason": "I wrote this myself and have drafts."}' | python -m json.tool
 
   # Resolve the appeal
   curl -s -X PATCH http://localhost:5000/appeals/cnt_123 \
