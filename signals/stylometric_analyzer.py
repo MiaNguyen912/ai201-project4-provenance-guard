@@ -1,6 +1,12 @@
 import re
 import statistics
 
+_FILLER_WORDS = {
+    "ok", "okay", "honestly", "anyway", "actually", "literally",
+    "basically", "tbh", "btw", "lol", "idk", "omg", "imo", "fyi",
+    "kinda", "sorta", "gonna", "wanna", "gotta", "yep", "nope",
+}
+
 
 def _sentences(text: str) -> list[str]:
     parts = re.split(r'(?<=[.!?])\s+', text.strip())
@@ -28,41 +34,47 @@ def analyze(text: str) -> dict:
     """
     sents = _sentences(text)
     tokens = _words(text)
-
-    # ── Metric 1: sentence-length standard deviation ──────────────────────
-    # AI writes uniformly-lengthed sentences; human writing varies more.
     lengths = [len(s.split()) for s in sents]
+
+    # ── Metric 1: sentence-length standard deviation (weight 0.30) ───────
+    # AI writes uniformly-lengthed sentences; human writing varies more.
+    # Threshold lowered from 25→12 to be sensitive at short-text scales.
     sent_std = statistics.stdev(lengths) if len(lengths) >= 2 else 0.0
-    # std=0 → 0.0 (AI-like),  std≥25 → 1.0 (human-like)
-    variance_score = min(sent_std / 25.0, 1.0)
+    variance_score = min(sent_std / 12.0, 1.0)
 
-    # ── Metric 2: type-token ratio (vocabulary diversity) ────────────────
-    # Higher diversity → more human-like.
-    ttr = len(set(tokens)) / len(tokens) if tokens else 0.5
-    # AI text typically clusters 0.45–0.60; human 0.60–0.80+
-    # Map: ttr=0.40 → 0.0,  ttr=0.80 → 1.0
-    ttr_score = max(0.0, min((ttr - 0.40) / 0.40, 1.0))
+    # ── Metric 2: informal register (weight 0.50) ─────────────────────────
+    # TTR is uniformly high (0.85+) for both AI and human in short texts and
+    # provides no separation. Replaced with signals that actually differ:
+    #   - contractions (won't, I've) — absent in formal/AI text
+    #   - sentences starting with lowercase — casual register
+    #   - filler / slang words (ok, honestly, gonna…)
+    contractions = len(re.findall(r"\b\w+'\w+\b", text))
+    lowercase_starts = sum(1 for s in sents if s and s[0].islower())
+    filler_count = sum(1 for w in tokens if w in _FILLER_WORDS)
+    informal_count = contractions + lowercase_starts + filler_count
+    informal_score = min(informal_count / max(len(sents), 1), 1.0)
 
-    # ── Metric 3: average sentence length ────────────────────────────────
-    # AI gravitates toward 12–22-word sentences; deviating either direction
+    # ── Metric 3: average sentence length (weight 0.20) ──────────────────
+    # AI gravitates toward 12–20-word sentences; deviating either direction
     # (very short or very long) is a mild human signal.
     avg_len = statistics.mean(lengths) if lengths else 15.0
     if avg_len < 12:
-        length_score = (12 - avg_len) / 12.0             # short → human
-    elif avg_len > 22:
-        length_score = min((avg_len - 22) / 20.0, 1.0)   # long  → human
+        length_score = (12 - avg_len) / 12.0
+    elif avg_len > 20:
+        length_score = min((avg_len - 20) / 20.0, 1.0)
     else:
-        length_score = 0.0                                # mid   → AI-like
+        length_score = 0.0
 
     # ── Weighted human score ──────────────────────────────────────────────
-    human_score = 0.45 * variance_score + 0.35 * ttr_score + 0.20 * length_score
+    human_score = 0.30 * variance_score + 0.50 * informal_score + 0.20 * length_score
 
     # ── Map to prediction + confidence ───────────────────────────────────
-    # At human_score=0.5: confidence=0.5 (truly uncertain)
-    # At human_score=0.0 or 1.0: confidence=0.90 (strong signal)
+    # Steeper multiplier (×1.5) so a clear signal produces a
+    # clearly high confidence instead of clustering near 0.5.
     prediction = "Human" if human_score >= 0.5 else "AI"
-    confidence = round(0.5 + min(abs(human_score - 0.5), 0.5) * 0.8, 3)
+    confidence = round(min(0.5 + abs(human_score - 0.5) * 1.5, 1.0), 3)
 
+    ttr = len(set(tokens)) / len(tokens) if tokens else 0.5
     return {
         "prediction": prediction,
         "confidence": confidence,

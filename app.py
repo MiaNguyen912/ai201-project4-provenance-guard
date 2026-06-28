@@ -26,6 +26,7 @@ limiter = Limiter(
     key_func=_client_key,
     app=app,
     default_limits=config.RATE_LIMIT_GLOBAL,
+    storage_uri="memory://", # "memory://"" resets every time the server restarts, that's fine for this project
 )
 
 
@@ -43,11 +44,10 @@ def rate_limit_exceeded(e):
 def submit():
     data = request.get_json(force=True, silent=True) or {}
 
-    creator_id = data.get("creator_id")
+    creator_id = data.get("creator_id") or get_remote_address()
     text = data.get("text")
-
-    if not creator_id or not text:
-        return jsonify({"error": "Missing required fields: creator_id, text"}), 400
+    if not text:
+        return jsonify({"error": "Missing required fields: text"}), 400
 
     content_id = "cnt_" + uuid.uuid4().hex[:8]
     request_id = "req_" + uuid.uuid4().hex[:8]
