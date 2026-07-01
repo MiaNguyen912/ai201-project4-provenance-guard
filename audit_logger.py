@@ -18,7 +18,10 @@ def _init_db() -> None:
         # - event_type: classification, appeal_submitted, appeal_reviewed
         # - original_request_id: for appeal_submitted and appeal_reviewed, points to the original classification request
         # - text:  for classification, the text of the original content; for appeal_submitted and appeal_reviewed, the text of the appeal reason
-        # - status: for classification, can be "classified" or "appealed"; for appeal_submitted, can be "pending" or "reviewed"; for appeal_reviewed, can be "final"
+        # - status: 
+        #       - for classification events: can be "classified", "under review", or "appealed"
+        #       - for appeal_submitted, can be "pending" or "reviewed"
+        #       - for appeal_reviewed, can be "classified" or "under review"
         # - final_classification: for appeal_reviewed, this is the re-evaluated classification, and can be "Human" or "AI"
         
         conn.execute("""
@@ -40,8 +43,6 @@ def _init_db() -> None:
             )
         """)
         conn.commit()
-
-
 
 _init_db()
 
@@ -111,3 +112,13 @@ def get_logs(limit: int = 50) -> list[dict]:
             (limit,),
         )
         return [_deserialize_row(dict(row)) for row in cursor.fetchall()]
+
+
+def update_status(content_id: str, new_status: str) -> None:
+    """Update the status of the most recent classification event for a content_id."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE audit_log SET status = ? WHERE content_id = ? AND event_type = 'classification'",
+            (new_status, content_id),
+        )
+        conn.commit()

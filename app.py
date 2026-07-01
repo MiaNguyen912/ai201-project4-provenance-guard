@@ -1,3 +1,5 @@
+import json
+import os
 import uuid
 
 import config
@@ -93,6 +95,7 @@ def submit():
 # ---------------------------------------------------------------------------
 
 @app.route("/audit/<content_id>", methods=["GET"])
+@limiter.limit(config.RATE_LIMIT_SUBMIT)
 def get_audit(content_id):
     events = audit_logger.get_entries_by_content_id(content_id)
     if not events:
@@ -105,6 +108,7 @@ def get_audit(content_id):
 # ---------------------------------------------------------------------------
 
 @app.route("/log", methods=["GET"])
+@limiter.limit(config.RATE_LIMIT_SUBMIT)
 def get_log():
     raw = request.args.get("num_latest_logs", "50")
     try:
@@ -113,6 +117,82 @@ def get_log():
         return jsonify({"error": "num_latest_logs must be an integer"}), 400
     entries = audit_logger.get_logs(limit=limit)
     return jsonify({"entries": entries})
+
+
+# ---------------------------------------------------------------------------
+# POST /appeals
+# ---------------------------------------------------------------------------
+
+@app.route("/appeal", methods=["POST"])    
+@limiter.limit(config.RATE_LIMIT_SUBMIT)
+def submit_appeal():
+    data = request.get_json(force=True, silent=True) or {}
+
+    content_id = data.get("content_id")
+    creator_id = data.get("creator_id") or get_remote_address()
+    appeal_reason = data.get("creator_reasoning")
+
+    if not content_id or not appeal_reason:
+        return jsonify({"error": "Missing required fields: content_id, creator_reasoning"}), 400
+
+    # Retrieve original classification event
+    original_events = audit_logger.get_entries_by_content_id(content_id)
+    if not original_events:
+        return jsonify({"error": f"No classification found for content_id: {content_id}"}), 404
+
+    # Find the original classification event (most recent one with event_type='classification')
+    original_event = None
+    for event in reversed(original_events):
+        if event.get("event_type") == "classification":
+            original_event = event
+            break
+
+    if not original_event:
+        return jsonify({"error": f"No classification found for content_id: {content_id}"}), 404
+
+    # Generate appeal request ID
+    appeal_request_id = "req_" + uuid.uuid4().hex[:8]
+
+    # Update original classification status to "under_review"
+    audit_logger.update_status(content_id, "under_review")
+
+    # Log appeal_submitted audit event
+    audit_logger.add_log(
+        event_type="appeal_submitted",
+        creator_id=creator_id,
+        content_id=content_id,
+        request_id=appeal_request_id,
+        original_request_id=original_event.get("request_id"),
+        text=appeal_reason,
+        status="under_review",
+    )                
+
+    # Append to appeal_queue.jsonl
+    appeal_entry = {
+        "appeal_request_id": appeal_request_id,
+        "content_id": content_id,
+        "creator_id": creator_id,
+        "original_request_id": original_event.get("request_id"),
+        "original_classification": original_event.get("final_classification"),
+        "original_confidence": original_event.get("confidence"),
+        "appeal_reason": appeal_reason,
+        "text": original_event.get("text"),
+        "submitted_at": audit_logger.datetime.now(audit_logger.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "status": "pending_review",
+    }
+
+    logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+    os.makedirs(logs_dir, exist_ok=True)
+    appeal_queue_path = os.path.join(logs_dir, "appeal_queue.jsonl")
+    with open(appeal_queue_path, "a") as f:
+        f.write(json.dumps(appeal_entry) + "\n")
+
+    return jsonify({
+        "appeal_request_id": appeal_request_id,
+        "content_id": content_id,
+        "status": "under_review",
+        "message": "Appeal submitted successfully",
+    }), 201
 
 
 if __name__ == "__main__":
