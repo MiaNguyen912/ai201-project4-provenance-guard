@@ -2,6 +2,8 @@
 
 A backend API that classifies submitted text as human-written or AI-generated, scores confidence, surfaces a transparency label, and handles creator appeals.
 
+Demo URL: https://drive.google.com/file/d/1nVFEHZns0eYvtw3i3WIO6CyYlyq6A6kQ/view?usp=sharing
+
 ## Architecture Overview
 
 Provenance Guard analyzes submitted text through a multi-stage pipeline:
